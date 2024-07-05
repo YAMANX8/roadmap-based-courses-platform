@@ -537,7 +537,7 @@ router.post(
       const roleId = req.user.roleId;
       const courseId = req.params.courseId;
       // item_type =>  1 article | 2 video | 3 quiz
-      const { itemTitle, topics, item_type } = req.body; // topics are array of topicsID
+      const { itemTitle, topics, item_type, quiz_points } = req.body; // topics are array of topicsID
       // permission
       const hasAccess = await checkPermission(
         instructorId,
@@ -562,6 +562,8 @@ router.post(
       const addNewItemQuery = `
       INSERT INTO items (item_title, item_no, course_id, topic_id, item_type)
       VALUES ($1, $2, $3, $4, $5)
+      RETURNING
+      item_id
     `;
       const addNewItemValues = [
         itemTitle,
@@ -570,8 +572,17 @@ router.post(
         lastTopicId,
         item_type,
       ];
-      await pool.query(addNewItemQuery, addNewItemValues);
+      const result = await pool.query(addNewItemQuery, addNewItemValues);
 
+      if (item_type === 3) {
+        const newItemId = result.rows[0].item_id;
+        const addNewQuiz = `
+      INSERT INTO quiz (quiz_points, item_id)
+      VALUES ($1, $2)
+    `;
+        const addNewQuizValues = [quiz_points, newItemId];
+        await pool.query(addNewQuiz, addNewQuizValues);
+      }
       res.status(200).json({ message: 'Item is added successfully' });
       // respone
     } catch (err) {
@@ -657,47 +668,51 @@ router.put(
 );
 
 // get code_session
-router.get('/curriculum/code-session/:itemId', authorization, async (req, res) => {
-  try {
-    const instructorId = req.user.userId;
-    const roleId = req.user.roleId;
-    const itemId = req.params.itemId;
-    // permission
-    const hasAccess = await checkPermission(
-      instructorId,
-      'instructor_content_management',
-      roleId,
-    );
-    if (!hasAccess) {
-      return res.status(403).json('Access denied');
-    }
+router.get(
+  '/curriculum/code-session/:itemId',
+  authorization,
+  async (req, res) => {
+    try {
+      const instructorId = req.user.userId;
+      const roleId = req.user.roleId;
+      const itemId = req.params.itemId;
+      // permission
+      const hasAccess = await checkPermission(
+        instructorId,
+        'instructor_content_management',
+        roleId,
+      );
+      if (!hasAccess) {
+        return res.status(403).json('Access denied');
+      }
 
-    const getInfoAboutSession = `
+      const getInfoAboutSession = `
         SELECT * FROM code_session WHERE item_id = $1;
     `;
-    const getInfoAboutSessionValue = [itemId];
-    const result = await pool.query(
-      getInfoAboutSession,
-      getInfoAboutSessionValue,
-    );
-    // Map and transform the data to the required format
-    const response = result.rows.map((row) => {
-      const decodedPath = decodeURIComponent(row.audio_path);
-      const keylogs = row.key_presses.map((press) => JSON.parse(press));
+      const getInfoAboutSessionValue = [itemId];
+      const result = await pool.query(
+        getInfoAboutSession,
+        getInfoAboutSessionValue,
+      );
+      // Map and transform the data to the required format
+      const response = result.rows.map((row) => {
+        const decodedPath = decodeURIComponent(row.audio_path);
+        const keylogs = row.key_presses.map((press) => JSON.parse(press));
 
-      return {
-        session_id: row.session_id,
-        audioPath: `http://localhost:5000/audio/${decodedPath}`,
-        keylogs: keylogs,
-      };
-    });
+        return {
+          session_id: row.session_id,
+          audioPath: `http://localhost:5000/audio/${decodedPath}`,
+          keylogs: keylogs,
+        };
+      });
 
-    res.status(200).json(response);
-  } catch (err) {
-    console.error('Error retrieving video information:', err);
-    res.status(500).json({ error: 'Server Error' });
-  }
-});
+      res.status(200).json(response);
+    } catch (err) {
+      console.error('Error retrieving video information:', err);
+      res.status(500).json({ error: 'Server Error' });
+    }
+  },
+);
 
 // here we need to add code-session
 // delete item note when the course is published(enroll on the course) >> Items must not be allowed to be deleted
@@ -982,19 +997,39 @@ router.put('/curriculum/article/:itemId', authorization, async (req, res) => {
     if (!hasAccess) {
       return res.status(403).json('Access denied');
     }
-
-    const updateArticle = `
+    const oldArticleQuery = `
+        SELECT * FROM article WHERE item_id = $1
+      `;
+    const oldArticleValues = [itemId];
+    const oldArticleResult = await pool.query(
+      oldArticleQuery,
+      oldArticleValues,
+    );
+    if (oldArticleResult.rows.length > 0) {
+      const updateArticle = `
         UPDATE article
         SET article_body = $1
         WHERE item_id = $2
     `;
-    const updateArticelValue = [article_body, itemId];
+      const updateArticelValue = [article_body, itemId];
 
-    if (article_body && itemId) {
-      await pool.query(updateArticle, updateArticelValue);
+      if (article_body && itemId) {
+        await pool.query(updateArticle, updateArticelValue);
+      }
+    } else {
+      const insertArticle = `
+          INSERT INTO article (article_body,item_id)
+        VALUES
+        ($1,$2);
+        `;
+      const insertArticelValue = [article_body, itemId];
+      await pool.query(insertArticle, insertArticelValue);
     }
+
     // respone
-    res.status(200).json({ message: 'article updated successfully' });
+    res
+      .status(200)
+      .json({ message: 'article updated or inserted successfully' });
   } catch (err) {
     console.error('Error updating articel information:', err);
     res.status(500).json({ error: 'Server Error' });
